@@ -3,7 +3,8 @@
 
 Solution to the Employee Directory Application with the following topology, using CloudFormation.
 
-<img width="499" alt="project_employee_directory" src="https://github.com/user-attachments/assets/5963efda-b133-4821-9932-01622f799c1a" />
+<img width="499" alt="project_employee_directory" src="https://github.com/user-attachments/assets/5b52d973-27fd-4ae7-bc94-edd8a0c00f87" />
+
 
 
 
