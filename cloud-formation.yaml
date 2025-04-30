@@ -1,0 +1,289 @@
+Resources:
+  appVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: stack
+          Value: production
+  publicSubnet01:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref appVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: us-east-1a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: stack
+          Value: production
+  publicSubnet02:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref appVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: us-east-1b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: stack
+          Value: production
+  privateSubnet01:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref appVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: us-east-1a
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: stack
+          Value: production
+  privateSubnet02:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref appVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: us-east-1b
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: stack
+          Value: production
+  appASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref appEC2Template
+        Version: !GetAtt appEC2Template.LatestVersionNumber
+      MaxSize: '4'
+      MinSize: '1'
+      DesiredCapacity: '1'
+      TargetGroupARNs:
+        - !Ref AppTargetGroup
+      VPCZoneIdentifier:
+        - !Ref privateSubnet01
+        - !Ref privateSubnet02
+      MetricsCollection:
+        - Granularity: 1Minute
+          Metrics:
+            - GroupMinSize
+            - GroupMaxSize
+      Tags:
+        - Key: Environment
+          Value: Production
+          PropagateAtLaunch: true
+        - Key: Purpose
+          Value: WebServerGroup
+          PropagateAtLaunch: false
+  appInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref S3DynamoDBFullAccessRole
+  appEC2Template:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: appEC2Template
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Name: !Ref appInstanceProfile
+        DisableApiTermination: false
+        ImageId: ami-0e449927258d45bc4
+        InstanceType: t2.micro
+        SecurityGroupIds:
+          - !Ref appSG
+        UserData: !Base64
+          Fn::Sub: |
+            #!/bin/bash -ex
+            yum install wget unzip amazon-cloudwatch-agent -y
+            wget https://aws-tc-largeobjects.s3-us-west-2.amazonaws.com/DEV-AWS-MO-GCNv2/FlaskApp.zip
+            unzip FlaskApp.zip
+            cd FlaskApp/
+            yum -y install python3-pip
+            pip install -r requirements.txt
+            yum -y install stress
+            export PHOTOS_BUCKET=${EmployeeS3Bucket}
+            export AWS_DEFAULT_REGION=us-east-1
+            export DYNAMO_MODE=on
+            export FLASK_APP=application.py
+            /usr/local/bin/flask run --host=0.0.0.0 --port=80
+  appSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to client host
+      VpcId: !Ref appVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  S3DynamoDBFullAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  Employees:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Employees
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+  EmployeeS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: employee-web-app0987654321
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: alias/aws/s3
+      PublicAccessBlockConfiguration:
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  EmployeeS3BucketBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref EmployeeS3Bucket
+      PolicyDocument:
+        Id: RequireEncryptionInTransit
+        Version: '2012-10-17'
+        Statement:
+          - Principal: '*'
+            Action: '*'
+            Effect: Deny
+            Resource:
+              - !GetAtt EmployeeS3Bucket.Arn
+              - !Sub ${EmployeeS3Bucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: app-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref appVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  AppLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: app-alb
+      Scheme: internet-facing
+      Subnets:
+        - !Ref publicSubnet01
+        - !Ref publicSubnet02
+      SecurityGroups:
+        - !Ref appSG
+      Type: application
+
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: app-target-group
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref appVPC
+      TargetType: instance
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 5
+
+  AppListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppTargetGroup
+      LoadBalancerArn: !Ref AppLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref appVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation01:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref publicSubnet01
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociation02:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref publicSubnet02
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref publicSubnet01
+      Tags:
+        - Key: Name
+          Value: app-nat-gw
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref appVPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetRouteTableAssociation01:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref privateSubnet01
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetRouteTableAssociation02:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref privateSubnet02
+      RouteTableId: !Ref PrivateRouteTable
+
